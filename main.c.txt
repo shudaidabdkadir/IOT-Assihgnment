@@ -1,0 +1,155 @@
+#include <stdio.h>
+#include <string.h>
+#include "esp_log.h"
+#include "esp_camera.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_http_server.h"
+
+static const char *TAG = "CapstoneCamera";
+
+// --- CORRECTED CAMERA PIN MAP (From your diagram) ---
+#define PWDN_GPIO_NUM     -1
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      15
+#define SIOD_GPIO_NUM      4
+#define SIOC_GPIO_NUM      5
+
+#define Y9_GPIO_NUM        16
+#define Y8_GPIO_NUM        17
+#define Y7_GPIO_NUM        18
+#define Y6_GPIO_NUM        12
+#define Y5_GPIO_NUM        10
+#define Y4_GPIO_NUM        8
+#define Y3_GPIO_NUM        9
+#define Y2_GPIO_NUM        11
+
+#define VSYNC_GPIO_NUM     6
+#define HREF_GPIO_NUM      7
+#define PCLK_GPIO_NUM      13
+
+// --- HTTP SERVER HANDLER ---
+// This function packages the camera frame as a JPEG and sends it to your browser
+esp_err_t stream_handler(httpd_req_t *req) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        ESP_LOGE(TAG, "Camera capture failed");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    
+    httpd_resp_set_type(req, "image/jpeg");
+    esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+    esp_camera_fb_return(fb); // MUST free the memory for the next frame
+    return res;
+}
+
+// --- STARTUP THE SERVER ---
+void start_webserver(void) {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    httpd_handle_t server = NULL;
+    
+    if (httpd_start(&server, &config) == ESP_OK) {
+        httpd_uri_t uri_get = { 
+            .uri = "/", 
+            .method = HTTP_GET, 
+            .handler = stream_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &uri_get);
+        
+        ESP_LOGI(TAG, "=============================================");
+        ESP_LOGI(TAG, "SUCCESS! THE WEB SERVER IS RUNNING!");
+        ESP_LOGI(TAG, "1. Connect laptop Wi-Fi to: Capstone_Camera");
+        ESP_LOGI(TAG, "2. Open browser to: http://192.168.4.1");
+        ESP_LOGI(TAG, "=============================================");
+    }
+}
+
+// --- MAIN APPLICATION WAKEUP ---
+void app_main(void) {
+    // 1. Initialize NVS Memory (Strictly required for Wi-Fi to work)
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      nvs_flash_erase();
+      nvs_flash_init();
+    }
+
+    // 2. Initialize Camera Hardware
+    camera_config_t camera_config = {
+        .pin_pwdn = PWDN_GPIO_NUM, 
+        .pin_reset = RESET_GPIO_NUM, 
+        .pin_xclk = XCLK_GPIO_NUM,
+        .pin_sccb_sda = SIOD_GPIO_NUM, 
+        .pin_sccb_scl = SIOC_GPIO_NUM,
+        .pin_d7 = Y9_GPIO_NUM, 
+        .pin_d6 = Y8_GPIO_NUM, 
+        .pin_d5 = Y7_GPIO_NUM, 
+        .pin_d4 = Y6_GPIO_NUM,
+        .pin_d3 = Y5_GPIO_NUM, 
+        .pin_d2 = Y4_GPIO_NUM, 
+        .pin_d1 = Y3_GPIO_NUM, 
+        .pin_d0 = Y2_GPIO_NUM,
+        .pin_vsync = VSYNC_GPIO_NUM, 
+        .pin_href = HREF_GPIO_NUM, 
+        .pin_pclk = PCLK_GPIO_NUM,
+
+        .xclk_freq_hz = 10000000, // 10MHz for ultimate demo stability
+        .ledc_timer = LEDC_TIMER_0, 
+        .ledc_channel = LEDC_CHANNEL_0,
+
+        .pixel_format = PIXFORMAT_JPEG, 
+        .frame_size = FRAMESIZE_UXGA, // MAX RESOLUTION: 1600x1200!
+        .jpeg_quality = 8,            // Lower number = less compression, crisper image
+        .fb_count = 2,               // 2 buffers in PSRAM
+        .grab_mode = CAMERA_GRAB_LATEST, 
+        .fb_location = CAMERA_FB_IN_PSRAM,
+    };
+    
+    esp_err_t cam_err = esp_camera_init(&camera_config);
+    if (cam_err != ESP_OK) {
+        ESP_LOGE(TAG, "Camera init failed with error 0x%x", cam_err);
+        return; // Stop if camera fails
+    }
+// --- ADVANCED SENSOR TUNING ---
+    sensor_t * s = esp_camera_sensor_get();
+    if (s != NULL) {
+        s->set_contrast(s, 1);       // Boost contrast (-2 to 2)
+        s->set_saturation(s, 2);     // Boost color saturation (-2 to 2)
+        s->set_brightness(s, 0);     // Keep brightness neutral (-2 to 2)
+        
+        // Improve White Balance for Plant lighting
+        s->set_whitebal(s, 1);       // Enable Auto White Balance
+        s->set_awb_gain(s, 1);       // Enable AWB Gain
+        s->set_wb_mode(s, 0);        // 0 = Auto, 1 = Sunny, 2 = Cloudy, 3 = Office
+        
+        // Note: If the image looks washed out under bright lights, 
+        // you can lower exposure by adding: s->set_aec2(s, 1);
+    }
+    // 3. Create 'Capstone_Camera' No-Password Wi-Fi Network
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_ap();
+    
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    
+    wifi_config_t wifi_config = {
+        .ap = {
+            .ssid = "Capstone_Camera",
+            .ssid_len = strlen("Capstone_Camera"),
+            .channel = 1,
+            .password = "", // Empty means NO PASSWORD
+            .max_connection = 4,
+            .authmode = WIFI_AUTH_OPEN 
+        },
+    };
+    
+    esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
+    esp_wifi_start();
+
+    // 4. Start the Web Server to listen for your browser
+    start_webserver();
+}
